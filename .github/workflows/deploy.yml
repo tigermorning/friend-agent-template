@@ -50,8 +50,51 @@ jobs:
             COMMIT_SHA=${{ github.sha }}
             ENV=${{ vars.ENV }}
           flags: --service-account=${{ vars.RUNTIME_SA }} --startup-probe=httpGet.path=/health,periodSeconds=5,failureThreshold=12,timeoutSeconds=2
+          # 새 리비전은 트래픽 0%로만 올리고, 이 리비전에만 닿는 green 태그 URL 을 붙인다.
+          # 같은 태그 이름을 다시 붙이면 이전 리비전의 green 태그는 이 리비전으로 옮겨 온다.
+          no_traffic: true
+          tag: green
+
+      - name: 지금 트래픽을 받는 리비전 기록
+        run: |
+          # 롤백할 때 되돌아갈 곳. 콘솔을 볼 수 없으니 명령으로 알아낸다.
+          gcloud run services describe "${{ vars.SERVICE }}" --region us-central1 --project "${{ vars.GCP_PROJECT_ID }}" --format=json \
+            | jq -r '.status.traffic[] | select(.percent==100) | "이전 리비전(지금 100%) " + .revisionName'
+
+      - name: 태그 URL 찾기
+        id: tagurl
+        run: |
+          # deploy 액션의 url 출력은 서비스 주소라서, 새 리비전만 가리키는 green 태그 URL 은 따로 조회한다.
+          TAG_URL=$(gcloud run services describe "${{ vars.SERVICE }}" --region us-central1 --project "${{ vars.GCP_PROJECT_ID }}" --format=json \
+            | jq -r '.status.traffic[] | select(.tag=="green") | .url')
+          echo "태그 URL $TAG_URL"
+          test -n "$TAG_URL"
+          echo "url=$TAG_URL" >> "$GITHUB_OUTPUT"
+
+      - name: 스모크 테스트(태그 URL)
+        env:
+          TAG_URL: ${{ steps.tagurl.outputs.url }}
+        run: |
+          # 원래 서비스 주소가 아니라 태그 URL 로 확인한다. 원래 주소는 아직 이전 리비전이 대답한다.
+          for i in $(seq 1 12); do
+            code=$(curl -s -o /dev/null -w "%{http_code}" "$TAG_URL/health" || true)
+            commit=$(curl -s "$TAG_URL/version" | jq -r '.commit // empty' || true)
+            echo "시도 $i: /health=$code, /version commit=$commit"
+            if [ "$code" = "200" ] && [ "$commit" = "${{ github.sha }}" ]; then
+              echo "스모크 테스트 통과"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "스모크 테스트 실패: 전환하지 않고 멈춘다. 사용자는 계속 이전 리비전을 쓴다."
+          exit 1
+
+      - name: 전환(트래픽 100%를 green 으로)
+        run: |
+          gcloud run services update-traffic "${{ vars.SERVICE }}" --region us-central1 --project "${{ vars.GCP_PROJECT_ID }}" --to-tags green=100
 
       - name: 배포 결과
         run: |
           echo "배포된 주소 ${{ steps.deploy.outputs.url }}"
           echo "배포한 이미지 $IMAGE"
+          curl -s "${{ steps.deploy.outputs.url }}/version"
