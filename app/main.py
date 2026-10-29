@@ -79,7 +79,8 @@ def home():
 
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    # 스테이지 6 실험: 본문은 그대로 두고 상태 코드만 항상 503 으로 돌려주는 망가진 버전(시험 뒤 되돌림)
+    return JSONResponse({"status": "ok"}, status_code=503)
 
 
 @app.get("/version")
